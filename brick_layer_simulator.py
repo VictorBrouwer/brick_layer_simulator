@@ -72,199 +72,137 @@ optimized_build_order = []
 brick_stride_map = {}
 current_bond_type = BondType.NORMAL
 
-def generate_normal_bond(start_x, bottom_y, end_x):
-    global all_bricks
-    num_layers = int(WALL_HEIGHT / COURSE_HEIGHT)
+def create_brick(x, y, x_mm, y_mm, brick_type):
+    if brick_type == BrickType.FULL:
+        width = scaled_brick_length
+    elif brick_type == BrickType.HALF:
+        width = scaled_half_brick_length
+    elif brick_type == BrickType.DRIEKLEZOOR:
+        width = scaled_drieklezoor_length
     
-    for layer in range(num_layers):
-        # Start from bottom layer and work upwards
-        y = bottom_y - (layer + 1) * (scaled_brick_height + scaled_bed_joint)
-        # Track real positions (in mm) for determining the strid of a brick
-        x_mm = 0
-        y_mm = layer * COURSE_HEIGHT
-        # Determine if this is an odd or even layer
-        is_odd_layer = layer % 2 == 1
-        # Calculate the starting x position for this layer
-        x = start_x
-        layer_bricks = []
-        while x < end_x:
-            # First check if we need to start with a half brick
-            if x == start_x and is_odd_layer:
-                brick = {
-                    'x': x,
-                    'y': y,
-                    'width': scaled_half_brick_length,
-                    'type': BrickType.HALF,
-                    'x_mm': x_mm,
-                    'y_mm': y_mm,
-                }
-                layer_bricks.append(brick)
-                x += scaled_half_brick_length + scaled_head_joint
-                x_mm += HALF_BRICK_LENGTH + HEAD_JOINT
-                
-            # Check if we need a half brick at the end
-            remaining_width = end_x - x
-            remaining_width_mm = WALL_WIDTH - x_mm
+    return {
+        'x': x,
+        'y': y,
+        'width': width,
+        'type': brick_type,
+        'x_mm': x_mm,
+        'y_mm': y_mm,
+    }
+
+def update_positions(x, x_mm, brick_type, add_joint=True):
+    if brick_type == BrickType.FULL:
+        x_increment = scaled_brick_length
+        x_mm_increment = FULL_BRICK_LENGTH
+    elif brick_type == BrickType.HALF:
+        x_increment = scaled_half_brick_length
+        x_mm_increment = HALF_BRICK_LENGTH
+    elif brick_type == BrickType.DRIEKLEZOOR:
+        x_increment = scaled_drieklezoor_length
+        x_mm_increment = DRIEKLEZOOR_LENGTH
+    
+    # Add joint if needed
+    if add_joint:
+        x_increment += scaled_head_joint
+        x_mm_increment += HEAD_JOINT
+    
+    return x + x_increment, x_mm + x_mm_increment
+
+def generate_bond_layer(start_x, bottom_y, end_x, layer, bond_type):
+    # Calculate position values
+    y = bottom_y - (layer + 1) * (scaled_brick_height + scaled_bed_joint)
+    x_mm = 0
+    y_mm = layer * COURSE_HEIGHT
+    is_odd_layer = layer % 2 == 1
+    x = start_x
+    
+    layer_bricks = []
+    
+    if bond_type == BondType.NORMAL:
+        # Normal bond pattern
+        # For odd layers, start with half brick
+        if is_odd_layer and x == start_x:
+            brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
+            layer_bricks.append(brick)
+            x, x_mm = update_positions(x, x_mm, BrickType.HALF)
             
+        # Add full bricks until we reach the end
+        while x < end_x:
+            remaining_width = end_x - x
+            
+            # Handle end of row
             if remaining_width < scaled_brick_length:
-                # Add a half brick if there's not enough space for a full brick
                 if remaining_width >= scaled_half_brick_length:
-                    brick = {
-                        'x': x,
-                        'y': y,
-                        'width': scaled_half_brick_length,
-                        'type': BrickType.HALF,
-                        'x_mm': x_mm,
-                        'y_mm': y_mm,
-                    }
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
                     layer_bricks.append(brick)
-                    x += scaled_half_brick_length
-                    x_mm += HALF_BRICK_LENGTH
                 break
                 
             # Add a full brick
-            brick = {
-                'x': x,
-                'y': y,
-                'width': scaled_brick_length,
-                'type': BrickType.FULL,
-                'x_mm': x_mm,
-                'y_mm': y_mm,
-            }
+            brick = create_brick(x, y, x_mm, y_mm, BrickType.FULL)
             layer_bricks.append(brick)
-            # Move to the next brick position (including head joint)
-            x += scaled_brick_length + scaled_head_joint
-            x_mm += FULL_BRICK_LENGTH + HEAD_JOINT
-        
-        all_bricks.append(layer_bricks)
-
-
-# Even rows: start with DRIEKLEZOOR, then alternate FULL and HALF, end with FULL
-# Odd rows: start with FULL, then alternate HALF and FULL, end with DRIEKLEZOOR
-def generate_flemish_bond(start_x, bottom_y, end_x):
-    global all_bricks
-    num_layers = int(WALL_HEIGHT / COURSE_HEIGHT)
+            x, x_mm = update_positions(x, x_mm, BrickType.FULL)
     
-    for layer in range(num_layers):
-        # Start from bottom layer (layer 0) and work upwards
-        y = bottom_y - (layer + 1) * (scaled_brick_height + scaled_bed_joint)
-        # Track real positions (in mm) for determining the stride of a brick
-        x_mm = 0
-        y_mm = layer * COURSE_HEIGHT
-        # Determine if this is an odd or even layer
-        is_odd_layer = layer % 2 == 1
-        # Calculate the starting x position for this layer
-        x = start_x
-        layer_bricks = []
-        
-        # Keep track of brick count to manage alternating pattern
+    elif bond_type == BondType.FLEMISH:
+        # Flemish bond pattern
         brick_count = 0
         
-        # Calculate total available width
-        available_width = end_x - start_x
-        
-        # Add bricks until we reach the end
         while x < end_x:
-            # First brick in the row
+            # First brick in row
             if brick_count == 0:
                 if is_odd_layer:
                     # Odd layer starts with FULL brick
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_brick_length,
-                        'type': BrickType.FULL,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
-                    x += scaled_brick_length + scaled_head_joint
-                    x_mm += FULL_BRICK_LENGTH + HEAD_JOINT
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.FULL)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.FULL)
                 else:
                     # Even layer starts with DRIEKLEZOOR
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_drieklezoor_length,
-                        'type': BrickType.DRIEKLEZOOR,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
-                    x += scaled_drieklezoor_length + scaled_head_joint
-                    x_mm += DRIEKLEZOOR_LENGTH + HEAD_JOINT
-                layer_bricks.append(brick)
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.DRIEKLEZOOR)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.DRIEKLEZOOR)
                 brick_count += 1
                 continue
-
+            
             # Calculate remaining width
             remaining_width = end_x - x
             
-            # Handle the end of the row differently based on layer type
+            # Handle end of row
             if is_odd_layer:
                 # Check if it's the last brick and there's just enough room for the DRIEKLEZOOR at the end
                 if remaining_width <= scaled_drieklezoor_length:
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_drieklezoor_length,
-                        'type': BrickType.DRIEKLEZOOR,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.DRIEKLEZOOR)
                     layer_bricks.append(brick)
                     break
             else:
                 # Check if there's just enough room for the FULL brick at the end
                 if remaining_width <= scaled_brick_length:
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_brick_length,
-                        'type': BrickType.FULL,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.FULL)
                     layer_bricks.append(brick)
                     break
             
-            # In the middle of the row alternate between FULL and HALF
+            # Middle of row - alternating patterns
             if is_odd_layer:
                 if brick_count % 2 == 1:  # After the first FULL, add HALF
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_half_brick_length,
-                        'type': BrickType.HALF,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
-                    x += scaled_half_brick_length + scaled_head_joint
-                    x_mm += HALF_BRICK_LENGTH + HEAD_JOINT
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.HALF)
                 else:  # Then add FULL
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_brick_length,
-                        'type': BrickType.FULL,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
-                    x += scaled_brick_length + scaled_head_joint
-                    x_mm += FULL_BRICK_LENGTH + HEAD_JOINT
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.FULL)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.FULL)
             else:
-                # Even layer alternates between FULL and HALF after DRIEKLEZOOR
                 if brick_count % 2 == 1:  # After DRIEKLEZOOR, add FULL
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_brick_length,
-                        'type': BrickType.FULL,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
-                    x += scaled_brick_length + scaled_head_joint
-                    x_mm += FULL_BRICK_LENGTH + HEAD_JOINT
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.FULL)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.FULL)
                 else:  # Then add HALF
-                    brick = {
-                        'x': x, 'y': y,
-                        'width': scaled_half_brick_length,
-                        'type': BrickType.HALF,
-                        'x_mm': x_mm, 'y_mm': y_mm,
-                    }
-                    x += scaled_half_brick_length + scaled_head_joint
-                    x_mm += HALF_BRICK_LENGTH + HEAD_JOINT
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.HALF)
             
-            layer_bricks.append(brick)
             brick_count += 1
-        
-        all_bricks.append(layer_bricks)
+    
+    return layer_bricks
 
-def generate_wall_layout():
+def generate_wall():
     global all_bricks
     all_bricks = []  # Clear any existing bricks
     
@@ -273,10 +211,13 @@ def generate_wall_layout():
     bottom_y = screen_height - 50
     end_x = start_x + scaled_wall_width
     
-    if current_bond_type == BondType.NORMAL:
-        generate_normal_bond(start_x, bottom_y, end_x)
-    elif current_bond_type == BondType.FLEMISH:
-        generate_flemish_bond(start_x, bottom_y, end_x)
+    # Calculate number of layers
+    num_layers = int(WALL_HEIGHT / COURSE_HEIGHT)
+    
+    # Generate each layer
+    for layer in range(num_layers):
+        layer_bricks = generate_bond_layer(start_x, bottom_y, end_x, layer, current_bond_type)
+        all_bricks.append(layer_bricks)
     
     # After creating the wall layout, we need to optimize the build order
     calculate_build_order()
@@ -297,8 +238,8 @@ def calculate_build_order():
         for brick in layer:
             # Calculate stride for each brick based on mm positions
             brickwidth_mm = brick['width'] / SCALE
-            x_stride = int((brick['x_mm'] + brickwidth_mm / 2) / STRIDE_WIDTH)
-            y_stride = int((brick['y_mm'] + COURSE_HEIGHT / 2) / STRIDE_HEIGHT)
+            x_stride = int((brick['x_mm'] + (brickwidth_mm / 2)) / STRIDE_WIDTH)
+            y_stride = int((brick['y_mm'] + (COURSE_HEIGHT / 2)) / STRIDE_HEIGHT)
             stride_key = (x_stride, y_stride)
             
             if stride_key not in stride_bricks:
@@ -361,14 +302,12 @@ def switch_bond_type():
     else:
         current_bond_type = BondType.NORMAL
     
-    # Reset the built bricks
+    # Reset the built bricks and regenerate the wall layout
     built_bricks = []
-    
-    # Regenerate the wall layout
-    generate_wall_layout()
+    generate_wall()
 
 def main():
-    generate_wall_layout()
+    generate_wall()
     
     # Initialize font
     font = pygame.font.SysFont(None, 24)
@@ -383,9 +322,8 @@ def main():
             elif event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE:  # SPACE key
                     switch_bond_type()
         
-        # First clear the screen
+        # First clear the screen and then draw wall
         screen.fill(BACKGROUND_COLOR)
-        # Draw the wall
         draw_wall()
         
         # Display current bond type and controls
