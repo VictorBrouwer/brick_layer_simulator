@@ -1,6 +1,7 @@
 import pygame
 import sys
 import math
+import random
 from enum import Enum
 
 # Brick and wall dimensions
@@ -27,6 +28,7 @@ class BrickType(Enum):
 class BondType(Enum):
     NORMAL = 1
     FLEMISH = 2
+    WILD = 3
 
 pygame.init()
 
@@ -70,6 +72,7 @@ built_bricks = []
 all_bricks = []
 optimized_build_order = []
 brick_stride_map = {}
+joint_positions = {}  # Changed to dictionary with layer as key
 current_bond_type = BondType.NORMAL
 
 def create_brick(x, y, x_mm, y_mm, brick_type):
@@ -108,6 +111,13 @@ def update_positions(x, x_mm, brick_type, add_joint=True):
     return x + x_increment, x_mm + x_mm_increment
 
 def generate_bond_layer(start_x, bottom_y, end_x, layer, bond_type):
+    global joint_positions
+    # Create a new entry for this layer if it doesn't exist
+    if layer not in joint_positions:
+        joint_positions[layer] = []
+    else:
+        joint_positions[layer] = []  # Reset layer joints
+    
     # Calculate position values
     y = bottom_y - (layer + 1) * (scaled_brick_height + scaled_bed_joint)
     x_mm = 0
@@ -200,7 +210,211 @@ def generate_bond_layer(start_x, bottom_y, end_x, layer, bond_type):
             
             brick_count += 1
     
+    elif bond_type == BondType.WILD:
+        # Wild bond pattern
+        brick_count = 0
+        consecutive_full_bricks = 0
+        consecutive_half_bricks = 0
+        
+        while x < end_x:
+            # First brick in row - corners have special rules
+            if brick_count == 0:
+                if is_odd_layer:
+                    # Odd layer starts with HALF brick
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.HALF)
+                    consecutive_half_bricks = 1
+                    consecutive_full_bricks = 0
+                    # Store the joint position at the end of this brick
+                    joint_positions[layer].append(x_mm - HEAD_JOINT)
+                else:
+                    # Even layer starts with DRIEKLEZOOR
+                    brick = create_brick(x, y, x_mm, y_mm, BrickType.DRIEKLEZOOR)
+                    layer_bricks.append(brick)
+                    x, x_mm = update_positions(x, x_mm, BrickType.DRIEKLEZOOR)
+                    consecutive_half_bricks = 0
+                    consecutive_full_bricks = 0
+                    # Store the joint position at the end of this brick
+                    joint_positions[layer].append(x_mm - HEAD_JOINT)
+                brick_count += 1
+                continue
+            
+            # Calculate remaining width
+            remaining_width = end_x - x
+            
+            # Handle end of row
+            if remaining_width < scaled_brick_length:
+                # If we're near the end, place the appropriate ending brick
+                if is_odd_layer:
+                    # Odd layer (starting with half) should end with drieklezoor if there's room
+                    if remaining_width >= scaled_drieklezoor_length:
+                        brick = create_brick(x, y, x_mm, y_mm, BrickType.DRIEKLEZOOR)
+                        layer_bricks.append(brick)
+                        # Store the joint position at the end of this brick
+                        joint_positions[layer].append(x_mm + DRIEKLEZOOR_LENGTH)
+                else:
+                    # Even layer (starting with drieklezoor) should end with half brick if there's room
+                    if remaining_width >= scaled_half_brick_length:
+                        brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
+                        layer_bricks.append(brick)
+                        # Store the joint position at the end of this brick
+                        joint_positions[layer].append(x_mm + HALF_BRICK_LENGTH)
+                break
+            
+            # Decide whether to use a full or half brick based on rules
+            use_full_brick = False
+            
+            # Check consecutive brick types - these are primary rules
+            if consecutive_half_bricks >= 3:
+                # Rule: max 3 half bricks in a row
+                use_full_brick = True
+            elif consecutive_full_bricks >= 5:
+                # Rule: max 5 full bricks in a row
+                use_full_brick = False
+            else:
+                # Calculate the potential joint positions for both brick types
+                full_joint_pos = x_mm + FULL_BRICK_LENGTH
+                half_joint_pos = x_mm + HALF_BRICK_LENGTH
+                
+                # Check for vertical staggered patterns (falling teeth pattern across layers)
+                full_pattern_length = 0
+                half_pattern_length = 0
+                
+                # We need to check if either joint position would continue a vertical pattern
+                if layer > 0:  # Only check if we have previous layers
+                    # Look for patterns in both potential brick placements
+                    full_pattern_length = check_vertical_pattern(layer, full_joint_pos)
+                    half_pattern_length = check_vertical_pattern(layer, half_joint_pos)
+                
+                # If either pattern is too long (6 or more), avoid extending it
+                if (full_pattern_length > 6) and (half_pattern_length > 6):
+                    print("Pattern too long for both full and half brick in layer", layer)
+                    print("at brick number", brick_count)
+                if full_pattern_length >= 6:
+                    use_full_brick = False  # Avoid extending the pattern with full brick
+                elif half_pattern_length >= 6:
+                    use_full_brick = True   # Avoid extending the pattern with half brick
+                else:
+                    # If no pattern concerns, randomly choose with slight preference for full bricks
+                    use_full_brick = random.random() < 0.6
+            
+            # Create the appropriate brick
+            if use_full_brick:
+                brick = create_brick(x, y, x_mm, y_mm, BrickType.FULL)
+                layer_bricks.append(brick)
+                next_joint_pos = x_mm + FULL_BRICK_LENGTH
+                x, x_mm = update_positions(x, x_mm, BrickType.FULL)
+                consecutive_full_bricks += 1
+                consecutive_half_bricks = 0
+            else:
+                brick = create_brick(x, y, x_mm, y_mm, BrickType.HALF)
+                layer_bricks.append(brick)
+                next_joint_pos = x_mm + HALF_BRICK_LENGTH
+                x, x_mm = update_positions(x, x_mm, BrickType.HALF)
+                consecutive_half_bricks += 1
+                consecutive_full_bricks = 0
+            
+            # Store the joint position
+            joint_positions[layer].append(next_joint_pos)
+            
+            brick_count += 1
+    
     return layer_bricks
+
+# Helper function to check for vertical staggered patterns
+def check_vertical_pattern(current_layer, joint_pos):
+    # Check for falling teeth pattern
+    teeth_pattern_length = check_pattern_type(current_layer, joint_pos, "falling_teeth")
+    if teeth_pattern_length > 6:
+        print("Pattern too long for falling teeth",)
+    
+    # Check for staggering left pattern
+    left_pattern_length = check_pattern_type(current_layer, joint_pos, "staggering_left")
+    if left_pattern_length > 6:
+        print("Pattern too long for staggering left",)
+    
+    # Check for staggering right pattern
+    right_pattern_length = check_pattern_type(current_layer, joint_pos, "staggering_right")
+    if right_pattern_length > 6:
+        print("Pattern too long for staggering right",)
+    
+    # Return the longest pattern found
+
+    return max(teeth_pattern_length, left_pattern_length, right_pattern_length)
+
+def check_pattern_type(current_layer, joint_pos, pattern_type):
+    # The offset distance we're looking for between layers
+    vertical_offset = 55
+    max_offset_tolerance = 10  # How much variation we allow
+    
+    pattern_length = 0
+    current_pos = joint_pos
+    
+    # For falling teeth pattern, we need to track both positions in the alternating pattern
+    original_pos = joint_pos
+    offset_pos = None  # Will be set when we find the first offset position
+    
+    # Start checking from the current_layer downward
+    for layer_id in range(current_layer-1, -1, -1):
+        if layer_id not in joint_positions:
+            break
+            
+        found_match = False
+        
+        for joint in joint_positions[layer_id]:
+            offset = joint - current_pos  # Positive = right, negative = left
+            
+            if pattern_type == "falling_teeth":
+                layer_offset = current_layer - layer_id
+                
+                if layer_offset % 2 == 0:
+                    # Even offset - should align with original position
+                    if abs(joint - original_pos) <= max_offset_tolerance:
+                        found_match = True
+                        current_pos = joint
+                        break
+                else:
+                    # Odd offset - should be at the offset position
+                    if offset_pos is None:
+                        # First time we've encountered an odd layer
+                        # Calculate how far this is from the original position
+                        if abs(abs(joint - original_pos) - vertical_offset) <= max_offset_tolerance:
+                            offset_pos = joint  # Remember this position for future odd layers
+                            found_match = True
+                            current_pos = joint
+                            break
+                    else:
+                        # Check if this odd layer aligns with previous odd layers
+                        if abs(joint - offset_pos) <= max_offset_tolerance:
+                            found_match = True
+                            current_pos = joint
+                            break
+                    
+            elif pattern_type == "staggering_left":
+                # For staggering left, we want negative offset (around -55mm)
+                if abs(offset + vertical_offset) <= max_offset_tolerance:
+                    found_match = True
+                    current_pos = joint
+                    break
+                    
+            elif pattern_type == "staggering_right":
+                # For staggering right, we want positive offset (around +55mm)
+                if abs(offset - vertical_offset) <= max_offset_tolerance:
+                    found_match = True
+                    current_pos = joint
+                    break
+        
+        if found_match:
+            pattern_length += 1
+        else:
+            break
+    
+    # For falling teeth pattern, we need at least 3 layers to confirm the pattern
+    if pattern_type == "falling_teeth" and pattern_length < 2:
+        return 0
+        
+    return pattern_length
 
 def generate_wall():
     global all_bricks
@@ -250,7 +464,7 @@ def calculate_build_order():
             # Create a dictionary to map each brick to its stride for coloring
             stride_index = y_stride * horizontal_strides + x_stride
             brick_key = (brick['x_mm'], brick['y_mm'])
-            brick_stride_map[brick_key] = stride_index
+            brick_stride_map[brick_key] = stride_index % len(STRIDE_COLORS)
     
     # Build the optimized order by iterating through strides from bottom to top and left to right
     for v in range(vertical_strides):
@@ -273,7 +487,7 @@ def draw_wall():
             if brick in built_bricks:
                 # Use the stride color for built bricks
                 brick_key = (brick['x_mm'], brick['y_mm'])
-                stride_index = brick_stride_map.get(brick_key)
+                stride_index = brick_stride_map.get(brick_key, 0)
                 color = STRIDE_COLORS[stride_index]
             else:
                 color = BRICK_COLOR_LIGHT_GREY
@@ -295,15 +509,18 @@ def build_next_brick():
     return False
 
 def switch_bond_type():
-    global current_bond_type, built_bricks
+    global current_bond_type, built_bricks, joint_positions
     
     if current_bond_type == BondType.NORMAL:
         current_bond_type = BondType.FLEMISH
+    elif current_bond_type == BondType.FLEMISH:
+        current_bond_type = BondType.WILD
     else:
         current_bond_type = BondType.NORMAL
     
-    # Reset the built bricks and regenerate the wall layout
+    # Reset the built bricks and joint positions
     built_bricks = []
+    joint_positions = {}
     generate_wall()
 
 def main():
@@ -327,7 +544,13 @@ def main():
         draw_wall()
         
         # Display current bond type and controls
-        bond_type_string = f"Current Bond: {'NORMAL' if current_bond_type == BondType.NORMAL else 'FLEMISH'}"
+        if current_bond_type == BondType.NORMAL:
+            bond_name = "NORMAL"
+        elif current_bond_type == BondType.FLEMISH:
+            bond_name = "FLEMISH"
+        else:
+            bond_name = "WILD"
+        bond_type_string = f"Current Bond: {bond_name}"
         bond_text = font.render(bond_type_string, True, (0, 0, 0))
         screen.blit(bond_text, (10, 10))
         controls_surface = font.render("Controls: ENTER = add brick, SPACE = switch bond", True, (0, 0, 0))
