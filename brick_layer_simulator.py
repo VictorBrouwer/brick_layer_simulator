@@ -36,6 +36,7 @@ pygame.init()
 BRICK_COLOR_LIGHT_GREY = (220, 220, 220)
 BRICK_COLOR_DARK_GREY = (130, 130, 130)
 BACKGROUND_COLOR = (255, 255, 255)
+JOINT_PROBLEM_COLOR = (255, 0, 0)  # Red color for problematic joints
 
 # Stride colors
 STRIDE_COLORS = [
@@ -73,6 +74,7 @@ all_bricks = []
 optimized_build_order = []
 brick_stride_map = {}
 joint_positions = {}  # Changed to dictionary with layer as key
+problematic_joints = {}  # Dictionary to track joints with long patterns {layer: [(joint_pos, pattern_type)]}
 current_bond_type = BondType.NORMAL
 
 def create_brick(x, y, x_mm, y_mm, brick_type):
@@ -287,16 +289,13 @@ def generate_bond_layer(start_x, bottom_y, end_x, layer, bond_type):
                     full_pattern_length = check_vertical_pattern(layer, full_joint_pos)
                     half_pattern_length = check_vertical_pattern(layer, half_joint_pos)
                 
-                # If either pattern is too long (6 or more), avoid extending it
-                if (full_pattern_length > 6) and (half_pattern_length > 6):
-                    print("Pattern too long for both full and half brick in layer", layer)
-                    print("at brick number", brick_count)
-                if full_pattern_length >= 6:
-                    use_full_brick = False  # Avoid extending the pattern with full brick
-                elif half_pattern_length >= 6:
-                    use_full_brick = True   # Avoid extending the pattern with half brick
+                # Always choose the brick type that results in the shortest pattern
+                if full_pattern_length > half_pattern_length:
+                    use_full_brick = False  # Use half brick because it creates a shorter pattern
+                elif half_pattern_length > full_pattern_length:
+                    use_full_brick = True   # Use full brick because it creates a shorter pattern
                 else:
-                    # If no pattern concerns, randomly choose with slight preference for full bricks
+                    # If both pattern lengths are equal, randomly choose with slight preference for full bricks
                     use_full_brick = random.random() < 0.6
             
             # Create the appropriate brick
@@ -327,26 +326,124 @@ def check_vertical_pattern(current_layer, joint_pos):
     # Check for falling teeth pattern
     teeth_pattern_length = check_pattern_type(current_layer, joint_pos, "falling_teeth")
     if teeth_pattern_length > 6:
-        print("Pattern too long for falling teeth",)
+        print("Pattern too long for falling teeth")
+        mark_problematic_joint(current_layer, joint_pos, "falling_teeth")
     
     # Check for staggering left pattern
     left_pattern_length = check_pattern_type(current_layer, joint_pos, "staggering_left")
     if left_pattern_length > 6:
-        print("Pattern too long for staggering left",)
+        print("Pattern too long for staggering left")
+        mark_problematic_joint(current_layer, joint_pos, "staggering_left")
     
     # Check for staggering right pattern
     right_pattern_length = check_pattern_type(current_layer, joint_pos, "staggering_right")
     if right_pattern_length > 6:
-        print("Pattern too long for staggering right",)
+        print("Pattern too long for staggering right")
+        mark_problematic_joint(current_layer, joint_pos, "staggering_right")
     
     # Return the longest pattern found
-
     return max(teeth_pattern_length, left_pattern_length, right_pattern_length)
+
+def mark_problematic_joint(layer, joint_pos, pattern_type):
+    """Mark a joint as part of a problematic pattern and also mark the connected joints in previous layers"""
+    global problematic_joints
+    
+    # Initialize the layer in the dictionary if it doesn't exist
+    if layer not in problematic_joints:
+        problematic_joints[layer] = []
+    
+    # Add the joint to the problematic joints list if not already there
+    joint_info = (joint_pos, pattern_type)
+    if joint_info not in problematic_joints[layer]:
+        problematic_joints[layer].append(joint_info)
+    
+    # Now trace the pattern back and mark all related joints in previous layers
+    trace_pattern_joints(layer, joint_pos, pattern_type)
+
+def trace_pattern_joints(current_layer, joint_pos, pattern_type):
+    """Trace the pattern backwards and mark all joints in the problematic pattern"""
+    vertical_offset = 55
+    max_offset_tolerance = 10
+    
+    current_pos = joint_pos
+    original_pos = joint_pos
+    offset_pos = None
+    
+    # Start checking from the current_layer downward
+    for layer_id in range(current_layer-1, -1, -1):
+        if layer_id not in joint_positions:
+            break
+            
+        found_match = False
+        matched_joint = None
+        
+        for joint in joint_positions[layer_id]:
+            offset = joint - current_pos  # Positive = right, negative = left
+            
+            if pattern_type == "falling_teeth":
+                layer_offset = current_layer - layer_id
+                
+                if layer_offset % 2 == 0:
+                    # Even offset - should align with original position
+                    if abs(joint - original_pos) <= max_offset_tolerance:
+                        found_match = True
+                        current_pos = joint
+                        matched_joint = joint
+                        break
+                else:
+                    # Odd offset - should be at the offset position
+                    if offset_pos is None:
+                        # First time we've encountered an odd layer
+                        if abs(abs(joint - original_pos) - vertical_offset) <= max_offset_tolerance:
+                            offset_pos = joint
+                            found_match = True
+                            current_pos = joint
+                            matched_joint = joint
+                            break
+                    else:
+                        # Check if this odd layer aligns with previous odd layers
+                        if abs(joint - offset_pos) <= max_offset_tolerance:
+                            found_match = True
+                            current_pos = joint
+                            matched_joint = joint
+                            break
+                    
+            elif pattern_type == "staggering_left":
+                # For staggering left, we want negative offset (around -55mm)
+                if abs(offset + vertical_offset) <= max_offset_tolerance:
+                    found_match = True
+                    current_pos = joint
+                    matched_joint = joint
+                    break
+                    
+            elif pattern_type == "staggering_right":
+                # For staggering right, we want positive offset (around +55mm)
+                if abs(offset - vertical_offset) <= max_offset_tolerance:
+                    found_match = True
+                    current_pos = joint
+                    matched_joint = joint
+                    break
+        
+        if found_match and matched_joint is not None:
+            # Mark this joint as problematic
+            if layer_id not in problematic_joints:
+                problematic_joints[layer_id] = []
+            joint_info = (matched_joint, pattern_type)
+            if joint_info not in problematic_joints[layer_id]:
+                problematic_joints[layer_id].append(joint_info)
+        else:
+            break
+    
+    # For falling teeth pattern, we need at least 3 layers to confirm the pattern
+    if pattern_type == "falling_teeth" and len(problematic_joints.get(current_layer, [])) < 2:
+        # Remove the single joint if we don't have enough to confirm the pattern
+        if current_layer in problematic_joints:
+            problematic_joints[current_layer] = [j for j in problematic_joints[current_layer] 
+                                              if j[1] != "falling_teeth" or j[0] != joint_pos]
 
 def check_pattern_type(current_layer, joint_pos, pattern_type):
     # The offset distance we're looking for between layers
     vertical_offset = 55
-    max_offset_tolerance = 10  # How much variation we allow
     
     pattern_length = 0
     current_pos = joint_pos
@@ -370,7 +467,7 @@ def check_pattern_type(current_layer, joint_pos, pattern_type):
                 
                 if layer_offset % 2 == 0:
                     # Even offset - should align with original position
-                    if abs(joint - original_pos) <= max_offset_tolerance:
+                    if abs(joint - original_pos) == 0:
                         found_match = True
                         current_pos = joint
                         break
@@ -379,28 +476,28 @@ def check_pattern_type(current_layer, joint_pos, pattern_type):
                     if offset_pos is None:
                         # First time we've encountered an odd layer
                         # Calculate how far this is from the original position
-                        if abs(abs(joint - original_pos) - vertical_offset) <= max_offset_tolerance:
+                        if abs(abs(joint - original_pos) - vertical_offset) == 0:
                             offset_pos = joint  # Remember this position for future odd layers
                             found_match = True
                             current_pos = joint
                             break
                     else:
                         # Check if this odd layer aligns with previous odd layers
-                        if abs(joint - offset_pos) <= max_offset_tolerance:
+                        if abs(joint - offset_pos) == 0:
                             found_match = True
                             current_pos = joint
                             break
                     
             elif pattern_type == "staggering_left":
                 # For staggering left, we want negative offset (around -55mm)
-                if abs(offset + vertical_offset) <= max_offset_tolerance:
+                if abs(offset + vertical_offset) == 0:
                     found_match = True
                     current_pos = joint
                     break
                     
             elif pattern_type == "staggering_right":
                 # For staggering right, we want positive offset (around +55mm)
-                if abs(offset - vertical_offset) <= max_offset_tolerance:
+                if abs(offset - vertical_offset) == 0:
                     found_match = True
                     current_pos = joint
                     break
@@ -497,6 +594,20 @@ def draw_wall():
                 color,
                 (brick['x'], brick['y'], brick['width'], scaled_brick_height)
             )
+    
+    # Draw problematic joints
+    for layer, joints in problematic_joints.items():
+        for joint_pos, pattern_type in joints:
+            # Calculate the screen position of the joint
+            x = (screen_width - scaled_wall_width) / 2 + (joint_pos * SCALE)
+            y = screen_height - 50 - (layer + 1) * (scaled_brick_height + scaled_bed_joint)
+            
+            # Draw a red vertical line at the joint position
+            pygame.draw.rect(
+                screen,
+                JOINT_PROBLEM_COLOR,
+                (x - scaled_head_joint/2, y, scaled_head_joint, scaled_brick_height)
+            )
 
 def build_next_brick():
     global built_bricks
@@ -509,7 +620,7 @@ def build_next_brick():
     return False
 
 def switch_bond_type():
-    global current_bond_type, built_bricks, joint_positions
+    global current_bond_type, built_bricks, joint_positions, problematic_joints
     
     if current_bond_type == BondType.NORMAL:
         current_bond_type = BondType.FLEMISH
@@ -521,6 +632,7 @@ def switch_bond_type():
     # Reset the built bricks and joint positions
     built_bricks = []
     joint_positions = {}
+    problematic_joints = {}  # Also reset problematic joints
     generate_wall()
 
 def main():
